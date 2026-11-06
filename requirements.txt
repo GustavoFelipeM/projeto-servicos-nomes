@@ -1,0 +1,2 @@
+# Nenhuma biblioteca externa é necessária.
+# O projeto utiliza exclusivamente módulos nativos do Python 3 (http, urllib, json, threading).
