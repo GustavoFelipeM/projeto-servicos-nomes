@@ -31,6 +31,17 @@ Projeto prático em Python puro demonstrando os conceitos de **Service Registry*
 * `scripts/run_demo.sh`: Script de automação para Linux / WSL / macOS.
 * `scripts/run_demo.ps1`: Script de automação para Windows (PowerShell).
 
+O registry disponibiliza os seguintes endpoints:
+
+* `POST /register`: registra ou atualiza uma instância.
+* `POST /heartbeat`: mantém uma instância ativa.
+* `POST /deregister`: remove uma instância durante um encerramento normal.
+* `GET /discover?name=pagamento`: retorna as instâncias disponíveis.
+
+O serviço tenta novamente o registro quando um heartbeat recebe `404`. O cliente
+possui timeout nas chamadas e tenta as demais instâncias caso a escolhida falhe.
+Instâncias sem heartbeat são removidas automaticamente depois do TTL (tempo de vida) configurado.
+
 
 ## Como Executar no Linux / WSL / macOS
 

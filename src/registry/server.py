@@ -1,7 +1,7 @@
 import json
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 REGISTRY = {}
@@ -16,17 +16,41 @@ class RegistryHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data).encode("utf-8"))
 
+    def _read_payload(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _parse_instance(self, data):
+        if not isinstance(data, dict):
+            return None
+        service_name = data.get("name")
+        url = data.get("url")
+        parsed_url = urlparse(url) if isinstance(url, str) else None
+        if (
+            not isinstance(service_name, str)
+            or not service_name.strip()
+            or not isinstance(url, str)
+            or not parsed_url
+            or parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.netloc
+        ):
+            return None
+        return service_name.strip(), url
+
     def do_POST(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
-        data = json.loads(body.decode("utf-8")) if body else {}
+        data = self._read_payload()
+        instance = self._parse_instance(data)
 
         # 1. Cadastro de novos serviços
         if self.path == "/register":
-            service_name = data.get("name")
-            url = data.get("url")
-            if not service_name or not url:
+            if instance is None:
                 return self._send_json(400, {"error": "Dados inválidos"})
+            service_name, url = instance
 
             with LOCK:
                 if service_name not in REGISTRY:
@@ -38,8 +62,9 @@ class RegistryHandler(BaseHTTPRequestHandler):
 
         # 2. Recebimento de sinal de vida (Heartbeat)
         elif self.path == "/heartbeat":
-            service_name = data.get("name")
-            url = data.get("url")
+            if instance is None:
+                return self._send_json(400, {"error": "Dados inválidos"})
+            service_name, url = instance
             with LOCK:
                 if service_name in REGISTRY and url in REGISTRY[service_name]:
                     REGISTRY[service_name][url] = time.time()
@@ -47,11 +72,26 @@ class RegistryHandler(BaseHTTPRequestHandler):
                     return self._send_json(200, {"status": "ok"})
             return self._send_json(404, {"error": "Instância não encontrada"})
 
+        # 3. Remoção explícita de uma instância em encerramento normal
+        elif self.path == "/deregister":
+            if instance is None:
+                return self._send_json(400, {"error": "Dados inválidos"})
+            service_name, url = instance
+            with LOCK:
+                instances = REGISTRY.get(service_name, {})
+                if url not in instances:
+                    return self._send_json(404, {"error": "Instância não encontrada"})
+                del instances[url]
+                if not instances:
+                    del REGISTRY[service_name]
+            print(f"[REGISTRY] - Serviço removido: '{service_name}' em {url}")
+            return self._send_json(200, {"status": "removido"})
+
         self._send_json(404, {"error": "Rota desconhecida"})
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        # 3. Resolução de nomes (Service Discovery)
+        # 4. Resolução de nomes (Service Discovery)
         if parsed.path == "/discover":
             query = parse_qs(parsed.query)
             service_name = query.get("name", [None])[0]
@@ -69,18 +109,24 @@ def auto_cleanup_health_check():
     """Thread de fundo para remover instâncias que sofreram crash ou queda."""
     while True:
         time.sleep(3)
-        now = time.time()
-        with LOCK:
-            for service, instances in list(REGISTRY.items()):
-                for url, last_seen in list(instances.items()):
-                    if now - last_seen > TTL_SECONDS:
-                        print(f"[REGISTRY] ✖ REMOVENDO INSTÂNCIA INATIVA: {service} ({url})")
-                        del REGISTRY[service][url]
+        cleanup_expired_instances()
+
+
+def cleanup_expired_instances(now=None):
+    now = time.time() if now is None else now
+    with LOCK:
+        for service, instances in list(REGISTRY.items()):
+            for url, last_seen in list(instances.items()):
+                if now - last_seen > TTL_SECONDS:
+                    print(f"[REGISTRY] REMOVENDO INSTANCIA INATIVA: {service} ({url})")
+                    del REGISTRY[service][url]
+            if not instances:
+                del REGISTRY[service]
 
 
 def main():
     threading.Thread(target=auto_cleanup_health_check, daemon=True).start()
-    server = HTTPServer(("127.0.0.1", 8000), RegistryHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", 8000), RegistryHandler)
     print("==================================================")
     print(" [REGISTRY] Servidor rodando em http://127.0.0.1:8000")
     print("==================================================")
